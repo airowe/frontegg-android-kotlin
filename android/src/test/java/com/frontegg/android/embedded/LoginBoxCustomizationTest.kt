@@ -8,10 +8,6 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * Covers the script builder that applies host-supplied theme/copy overrides to the
- * embedded login box.
- */
 class LoginBoxCustomizationTest {
 
     // region no-op cases
@@ -31,71 +27,98 @@ class LoginBoxCustomizationTest {
     // region payload
 
     @Test
-    fun `theme options are emitted under themeV2`() {
+    fun `assigns overrides to the global the login box reads`() {
         val script = LoginBoxCustomization.script(
             mapOf("loginBox" to mapOf("palette" to mapOf("primary" to mapOf("main" to "#3F6655")))),
             null
         )
 
         assertNotNull(script)
-        assertTrue(script!!.contains("\"themeV2\""))
-        assertTrue(script.contains("#3F6655"))
-        assertFalse(script.contains("\"localizations\""))
+        assertTrue(script!!.startsWith("window.__fronteggLoginBoxOverrides = "))
+        assertTrue(script.endsWith(";"))
+        assertFalse(script.contains("window.fetch"))
+    }
+
+    @Test
+    fun `theme options are emitted under themeV2`() {
+        val payload = payloadOf(
+            mapOf("loginBox" to mapOf("palette" to mapOf("primary" to mapOf("main" to "#3F6655")))),
+            null
+        )
+
+        val main = payload.getJSONObject("themeV2")
+            .getJSONObject("loginBox")
+            .getJSONObject("palette")
+            .getJSONObject("primary")
+            .getString("main")
+
+        assertEquals("#3F6655", main)
+        assertFalse(payload.has("localizations"))
     }
 
     @Test
     fun `localizations are emitted under localizations`() {
-        val script = LoginBoxCustomization.script(
+        val payload = payloadOf(
             null,
             mapOf("en" to mapOf("loginBox" to mapOf("login" to mapOf("title" to "Sign-in"))))
         )
 
-        assertNotNull(script)
-        assertTrue(script!!.contains("\"localizations\""))
-        assertTrue(script.contains("Sign-in"))
-        assertFalse(script.contains("\"themeV2\""))
+        val title = payload.getJSONObject("localizations")
+            .getJSONObject("en")
+            .getJSONObject("loginBox")
+            .getJSONObject("login")
+            .getString("title")
+
+        assertEquals("Sign-in", title)
+        assertFalse(payload.has("themeV2"))
     }
 
     @Test
     fun `both overrides are emitted together`() {
-        val script = LoginBoxCustomization.script(
+        val payload = payloadOf(
             mapOf("loginBox" to mapOf("logo" to mapOf("image" to "https://example.com/logo.png"))),
             mapOf("en" to mapOf("loginBox" to mapOf("login" to mapOf("continue" to "Log In"))))
         )
 
-        assertNotNull(script)
-        assertTrue(script!!.contains("\"themeV2\""))
-        assertTrue(script.contains("\"localizations\""))
-        assertTrue(script.contains("example.com"))
-        assertTrue(script.contains("Log In"))
+        assertTrue(payload.has("themeV2"))
+        assertTrue(payload.has("localizations"))
     }
 
-    // endregion
-
-    // region script shape
-
     @Test
-    fun `script targets the login box metadata request`() {
-        val script = LoginBoxCustomization.script(
-            mapOf("loginBox" to mapOf("themeName" to "modern")),
+    fun `nested lists survive encoding`() {
+        val payload = payloadOf(
+            mapOf("loginBox" to mapOf("phoneNumberCountryCodes" to mapOf("allowedCountries" to listOf("us", "gb")))),
             null
         )
 
-        assertNotNull(script)
-        assertTrue(script!!.contains(LoginBoxCustomization.METADATA_PATH))
-        assertTrue(script.contains("window.fetch"))
-        // Guards against double-installing when the script is injected twice.
-        assertTrue(script.contains("__fronteggLoginBoxOverridesInstalled"))
+        val allowed = payload.getJSONObject("themeV2")
+            .getJSONObject("loginBox")
+            .getJSONObject("phoneNumberCountryCodes")
+            .getJSONArray("allowedCountries")
+
+        assertEquals(2, allowed.length())
+        assertEquals("us", allowed.getString(0))
+        assertEquals("gb", allowed.getString(1))
     }
 
-    // endregion
+    @Test
+    fun `quotes in copy do not break the payload`() {
+        val payload = payloadOf(
+            null,
+            mapOf("en" to mapOf("loginBox" to mapOf("login" to mapOf("title" to "Don't \"stop\" now"))))
+        )
 
-    // region encoding
+        val title = payload.getJSONObject("localizations")
+            .getJSONObject("en")
+            .getJSONObject("loginBox")
+            .getJSONObject("login")
+            .getString("title")
+
+        assertEquals("Don't \"stop\" now", title)
+    }
 
     @Test
     fun `javascript line terminators are escaped`() {
-        // U+2028/U+2029 are valid inside JSON but terminate a line in JavaScript source,
-        // which would break the emitted script.
         val script = LoginBoxCustomization.script(
             null,
             mapOf("en" to mapOf("note" to "a\u2028b\u2029c"))
@@ -108,57 +131,74 @@ class LoginBoxCustomizationTest {
         assertTrue(script.contains("\\u2029"))
     }
 
+    // endregion
+
+    // region unencodable values
+
     @Test
-    fun `emitted overrides parse back as json`() {
+    fun `values that cannot be represented in JSON drop the whole payload`() {
         val script = LoginBoxCustomization.script(
-            mapOf("loginBox" to mapOf("palette" to mapOf("primary" to mapOf("main" to "#16284A")))),
+            mapOf("loginBox" to mapOf("logo" to mapOf("image" to Any()))),
             null
         )
 
-        val json = script!!
-            .substringAfter("var overrides = ")
-            .substringBefore(";\n")
-
-        val parsed = JSONObject(json)
-        val main = parsed.getJSONObject("themeV2")
-            .getJSONObject("loginBox")
-            .getJSONObject("palette")
-            .getJSONObject("primary")
-            .getString("main")
-
-        assertEquals("#16284A", main)
+        assertNull(script)
     }
 
     @Test
-    fun `quotes in copy do not break the script`() {
-        val script = LoginBoxCustomization.script(
-            null,
-            mapOf("en" to mapOf("loginBox" to mapOf("login" to mapOf("title" to "Don't \"stop\" now"))))
+    fun `invalid key path is null for encodable values`() {
+        val value = mapOf(
+            "loginBox" to mapOf(
+                "themeName" to "modern",
+                "enabled" to true,
+                "order" to 3,
+                "ratio" to 1.5,
+                "tags" to listOf("a", "b"),
+                "absent" to null
+            )
         )
 
-        assertNotNull(script)
-        // JSONObject escapes the double quotes; the apostrophe is safe because the payload
-        // is embedded as an object literal, not a string.
-        assertTrue(script!!.contains("Don't \\\"stop\\\" now"))
+        assertNull(LoginBoxCustomization.invalidKeyPath(value))
+    }
+
+    @Test
+    fun `invalid key path names the offending key`() {
+        val value = mapOf("loginBox" to mapOf("palette" to mapOf("primary" to mapOf("main" to Any()))))
+
+        assertEquals("loginBox.palette.primary.main", LoginBoxCustomization.invalidKeyPath(value))
+    }
+
+    @Test
+    fun `invalid key path names the offending list element`() {
+        val value = mapOf("loginBox" to mapOf("tags" to listOf("ok", Any())))
+
+        assertEquals("loginBox.tags[1]", LoginBoxCustomization.invalidKeyPath(value))
+    }
+
+    @Test
+    fun `non finite numbers are rejected`() {
+        val value = mapOf("loginBox" to mapOf("ratio" to Double.NaN))
+
+        assertEquals("loginBox.ratio", LoginBoxCustomization.invalidKeyPath(value))
     }
 
     // endregion
 
-    // region origin scoping
+    // region origin
 
     @Test
     fun `auth origin drops path and query`() {
         assertEquals(
-            "https://auth.example.com",
-            LoginBoxCustomization.authOrigin("https://auth.example.com/oauth/account/login?x=1")
+            "https://app.example.com",
+            LoginBoxCustomization.authOrigin("https://app.example.com/auth?x=1")
         )
     }
 
     @Test
-    fun `auth origin preserves a non-default port`() {
+    fun `auth origin preserves a non default port`() {
         assertEquals(
-            "https://auth.example.com:8443",
-            LoginBoxCustomization.authOrigin("https://auth.example.com:8443")
+            "https://app.example.com:8443",
+            LoginBoxCustomization.authOrigin("https://app.example.com:8443")
         )
     }
 
@@ -168,14 +208,17 @@ class LoginBoxCustomizationTest {
         assertNull(LoginBoxCustomization.authOrigin("not a url"))
     }
 
-    @Test
-    fun `script reads a URL object request as well as a string`() {
-        val script = LoginBoxCustomization.script(mapOf("loginBox" to mapOf("themeName" to "modern")), null)
-
-        // Parity with iOS: fetch(new URL(...)) must resolve via .href, not just .url.
-        assertTrue(script!!.contains("input.href"))
-        assertTrue(script.contains("input.url"))
-    }
-
     // endregion
+
+    private fun payloadOf(
+        themeOptions: Map<String, Any?>?,
+        localizations: Map<String, Any?>?
+    ): JSONObject {
+        val script = LoginBoxCustomization.script(themeOptions, localizations)
+        assertNotNull(script)
+
+        val prefix = "window.${LoginBoxCustomization.GLOBAL_NAME} = "
+        val json = script!!.removePrefix(prefix).removeSuffix(";")
+        return JSONObject(json)
+    }
 }
